@@ -158,7 +158,26 @@ extern "C" void processFrame(unsigned char* buffer) {
 
         cv::resize(videoFrame, videoFrame, frame.size());
 
-        cv::addWeighted(frame, 0.7, videoFrame, 0.3, 0.0, frame);
+        cv::Scalar lowerGreen = cv::Scalar(0, 100, 0);
+        cv::Scalar upperGreen = cv::Scalar(100, 255, 100);
+
+        cv::Mat mask;
+
+        // Create a mask where green screen pixels are white (255) and everything else is black (0)
+        cv::inRange(videoFrame, lowerGreen, upperGreen, mask);
+
+        // prepare video and overlayed frame
+        
+        cv::Mat inverseMask;
+        cv::bitwise_not(mask, inverseMask);
+
+        cv::Mat foregroundContent;
+        videoFrame.copyTo(foregroundContent, inverseMask);
+
+        cv::Mat backgroundContent;
+        frame.copyTo(backgroundContent, mask);
+
+        cv::add(foregroundContent, backgroundContent, frame);
 
         if (!faces.empty()) {
             cv::Point headPosition(shape.part(30).x(), shape.part(30).y());

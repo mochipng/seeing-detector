@@ -1,8 +1,16 @@
 #ifndef TRACKER_H
 #define TRACKER_H
 
-extern int initializeTracker(int width, int height, const char* videoPath, const char* modelPath);
-extern void processFrame(unsigned char* buffer);
-extern void shutdownTracker();
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-#endif TRACKER_H
+int initializeTracker(int width, int height, const char* videoPath, const char* modelPath);
+void processFrame(unsigned char* buffer);
+void shutdownTracker();
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
