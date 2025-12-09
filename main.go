@@ -12,10 +12,11 @@ import (
 	"fmt"
 	"os"
 	"unsafe"
-
+	
 	"github.com/veandco/go-sdl2/sdl"
 )
 
+// define constant variables
 const (
 	width  = 640
 	height = 480
@@ -23,6 +24,7 @@ const (
 )
 
 func main() {
+	// file names
 	video := "distraction_video.mp4"
 	emoji := "emoji.png"
 	model := "shape_predictor_68_face_landmarks.dat"
@@ -77,11 +79,10 @@ func main() {
 
 	defer texture.Destroy()
 
-	// main loop
-
 	running := true
 	frameBuffer := make([]byte, buffer)
 
+	// main loop
 	for running {
 		for event := sdl.PollEvent(); event != nil; event = sdl.PollEvent() {
 			if _, ok := event.(*sdl.QuitEvent); ok {
