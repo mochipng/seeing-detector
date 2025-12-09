@@ -83,9 +83,10 @@ extern "C" int initializeTracker(int width, int height, const char* videoPath, c
     HEIGHT = height;
 
     // load shape predictor from dlib
-    predictor = dlib::shape_predictor();
+    detector = dlib::get_frontal_face_detector();
+
     try {
-        dlib::deseralize(modelPath) >> predictor;
+        dlib::deserialize(modelPath) >> predictor;
     } catch (dlib::serialization_error& e) {
         std::cerr << "Error loading shape predictor model." << e.what() << std::endl;
         return 0;
@@ -101,8 +102,8 @@ extern "C" int initializeTracker(int width, int height, const char* videoPath, c
     cap.set(cv::CAP_PROP_FRAME_HEIGHT, HEIGHT);
 
     // load video overlays
-    overlayVideo.open(videoPath);
-    if (!overlayVideo.isOpened())
+    videoOverlay.open(videoPath);
+    if (!videoOverlay.isOpened())
         std::cerr << "Error loading overlay video." << std::endl;
 
     emojiImage = cv::imread("emoji.png", cv::IMREAD_UNCHANGED);
@@ -120,7 +121,7 @@ extern "C" void processFrame(unsigned char* buffer) {
     if (frame.empty()) return;
 
     cv::resize(frame, frame, cv::Size(WIDTH, HEIGHT));
-    dlib::cv_image<dlib::bgrPixel> img(frame);
+    dlib::cv_image<dlib::bgr_pixel> img(frame);
 
     std::vector<dlib::rectangle> faces = detector(img);
     dlib::full_object_detection shape;
@@ -138,8 +139,9 @@ extern "C" void processFrame(unsigned char* buffer) {
         bool leftGazing = leftGaze < THRESHOLD_OUTER || leftGaze > THRESHOLD_INNER;
         
         userLooking = !(rightGazing || leftGazing);
+
     } else {
-        userLooking = true;
+        userLooking = false;
     }
 
     if (!userLooking) {
@@ -148,8 +150,9 @@ extern "C" void processFrame(unsigned char* buffer) {
 
         cv::Mat videoFrame;
         videoOverlay >> videoFrame;
+
         if (videoFrame.empty()) {
-            overlayVideo.set(cv::CAP_PROP_POS_FRAMES, 0);
+            videoOverlay.set(cv::CAP_PROP_POS_FRAMES, 0);
             videoOverlay >> videoFrame;
         }
 
@@ -161,11 +164,11 @@ extern "C" void processFrame(unsigned char* buffer) {
             cv::Point headPosition(shape.part(30).x(), shape.part(30).y());
             overlayImage(frame, emojiImage, headPosition);
         }
+    }
 
-        if (frame.total() * frame.elemSize() <= WIDTH * HEIGHT * 3) {
+    if (frame.total() * frame.elemSize() <= WIDTH * HEIGHT * 3) {
             std::memcpy(buffer, frame.data, frame.total() * frame.elemSize());
         }
-    }
 }
 
 extern "C" void shutdownTracker() {
