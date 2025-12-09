@@ -15,7 +15,7 @@ cv::VideoCapture cap;
 cv::VideoCapture videoOverlay;
 cv::Mat emojiImage;
 
-// camera dimensions, user state
+// camera dimensions, user state, counters for video overlay frames and frames user is looking away
 int WIDTH = 640;
 int HEIGHT = 480;
 bool userLooking = false;
@@ -28,7 +28,6 @@ dlib::cv_image<dlib::bgr_pixel> dlib_img(cv::Mat& mat) {
 }
 
 // overlay emoji on frame
-// Updated signature to accept targetSize for scaling
 void overlayImage(cv::Mat& background, const cv::Mat& foreground, cv::Point location, cv::Size targetSize) {
     if (foreground.channels() != 4 || background.channels() != 3) {
         std::cerr << "Foreground image does not have an alpha channel." << std::endl;
