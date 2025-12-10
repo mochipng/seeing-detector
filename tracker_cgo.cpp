@@ -23,7 +23,6 @@ bool userLooking = false;
 int videoFrameCount = 0;
 int distractionCounter = 0;
 bool audioPlay = false;
-bool videoHasPlayed = false;
 
 // convert OpenCV to dlib image format
 dlib::cv_image<dlib::bgr_pixel> dlib_img(cv::Mat& mat) {
@@ -87,22 +86,48 @@ double getEyeAspectRatio(const dlib::full_object_detection& shape, int startInde
     return (verticalDist1 + verticalDist2) / (2.0 * horizontalDist);
 }
 
-double getGazeRatio(const dlib::full_object_detection& shape, int startIndex) {
-    // eye corner points
+double getGazeRatio(const dlib::full_object_detection& shape, int startIndex, const cv::Mat& frame) {
+    // Get eye region corners
     cv::Point2f leftCorner(shape.part(startIndex).x(), shape.part(startIndex).y());
     cv::Point2f rightCorner(shape.part(startIndex + 3).x(), shape.part(startIndex + 3).y());
     
-    // iris/pupil approximation (center of eye)
-    double pupilX = (shape.part(startIndex + 1).x() + shape.part(startIndex + 2).x() + 
-                     shape.part(startIndex + 4).x() + shape.part(startIndex + 5).x()) / 4.0;
+    // Define eye region bounding box
+    std::vector<cv::Point> eyePoints;
+    for (int i = 0; i < 6; i++) {
+        eyePoints.push_back(cv::Point(shape.part(startIndex + i).x(), 
+                                      shape.part(startIndex + i).y()));
+    }
+    cv::Rect eyeRect = cv::boundingRect(eyePoints);
+    
+    // Add padding and clamp to frame bounds
+    eyeRect.x = std::max(0, eyeRect.x - 5);
+    eyeRect.y = std::max(0, eyeRect.y - 5);
+    eyeRect.width = std::min(frame.cols - eyeRect.x, eyeRect.width + 10);
+    eyeRect.height = std::min(frame.rows - eyeRect.y, eyeRect.height + 10);
+    
+    if (eyeRect.width <= 0 || eyeRect.height <= 0) return 0.5;
+    
+    // Extract eye region
+    cv::Mat eyeROI = frame(eyeRect);
+    cv::Mat grayEye;
+    cv::cvtColor(eyeROI, grayEye, cv::COLOR_BGR2GRAY);
+    
+    // Apply threshold to find dark pupil
+    cv::GaussianBlur(grayEye, grayEye, cv::Size(5, 5), 0);
+    cv::threshold(grayEye, grayEye, 30, 255, cv::THRESH_BINARY_INV);
+    
+    // Find moments to get pupil center
+    cv::Moments m = cv::moments(grayEye, true);
+    if (m.m00 == 0) return 0.5;
+    
+    double pupilX = m.m10 / m.m00 + eyeRect.x;  // Convert back to frame coordinates
     
     double eyeWidth = std::abs(rightCorner.x - leftCorner.x);
     if (eyeWidth < 1) return 0.5;
-
-    // normalize pupil position relative to eye width
+    
     double gazeRatio = (pupilX - leftCorner.x) / eyeWidth;
     
-    return gazeRatio;
+    return std::max(0.0, std::min(1.0, gazeRatio));  // Clamp to [0,1]
 }
 
 // functions to be called by Go
@@ -154,34 +179,32 @@ extern "C" void processFrame(unsigned char* buffer) {
     if (frame.empty()) return;
 
     cv::resize(frame, frame, cv::Size(WIDTH, HEIGHT));
-    dlib::cv_image<dlib::bgr_pixel> img(frame);
 
+    dlib::cv_image<dlib::bgr_pixel> img(frame);
     std::vector<dlib::rectangle> faces = detector(img);
     dlib::full_object_detection shape;
 
     if (!faces.empty()) {
         shape = predictor(img, faces[0]);
 
-        double leftGaze = getGazeRatio(shape, 36);
-        double rightGaze = getGazeRatio(shape, 42); 
-        
+        const double GAZE_CENTER_MIN = 0.30;
+        const double GAZE_CENTER_MAX = 0.70;
+        const double EAR_THRESHOLD = 0.23;
+
+        double leftGaze = getGazeRatio(shape, 36, frame);
+        double rightGaze = getGazeRatio(shape, 42, frame);
+        double avgGaze = (leftGaze + rightGaze) / 2.0;
+
+        // use average instead of checking each eye separately
+        bool lookingAway = (avgGaze < GAZE_CENTER_MIN) || (avgGaze > GAZE_CENTER_MAX);
+            
         // calculate eye aspect ratio to detect closed eyes
         double leftEAR = getEyeAspectRatio(shape, 36);
         double rightEAR = getEyeAspectRatio(shape, 42);
         double avgEAR = (leftEAR + rightEAR) / 2.0;
-        
-        const double GAZE_CENTER_MIN = 0.43;
-        const double GAZE_CENTER_MAX = 0.57;
-        const double EAR_THRESHOLD = 0.23;
-        
+            
         // check if eyes are closed
         bool eyesClosed = avgEAR < EAR_THRESHOLD;
-        
-        // check if looking away horizontally
-       // Check EITHER eye looking away (OR not AND)
-        bool leftLookingAway = (leftGaze < GAZE_CENTER_MIN) || (leftGaze > GAZE_CENTER_MAX);
-        bool rightLookingAway = (rightGaze < GAZE_CENTER_MIN) || (rightGaze > GAZE_CENTER_MAX);
-        bool lookingAway = leftLookingAway || rightLookingAway;
 
         userLooking = !eyesClosed && !lookingAway;
 
@@ -189,7 +212,7 @@ extern "C" void processFrame(unsigned char* buffer) {
         static int frameDebugCounter = 0;
         if (++frameDebugCounter % 30 == 0) {
             std::cout << "L:" << leftGaze << " R:" << rightGaze << " EAR:" << avgEAR 
-              << " Looking:" << userLooking << " Counter:" << distractionCounter << std::endl;
+            << " Looking:" << userLooking << " Counter:" << distractionCounter << std::endl;
         }
 
     } else {
@@ -206,26 +229,23 @@ extern "C" void processFrame(unsigned char* buffer) {
     } else {
         distractionCounter = std::max(distractionCounter - 1, 0); 
 
-        if (videoFrameCount > 0) {
+        if (distractionCounter == 0 && videoFrameCount > 0) {
             videoFrameCount = 0;
             videoOverlay.set(cv::CAP_PROP_POS_FRAMES, 0);
-            std::cout << "VIDEO STOPPED - User looking back" << std::endl;
+            std::cout << "VIDEO STOPPED - User looking back, ready for next session" << std::endl;
         }
     }
 
-    // only trigger if video hasn't played yet
     bool shouldStartVideo = (distractionCounter >= DISTRACTION_THRESHOLD) && 
-                           (videoFrameCount == 0) && 
-                           !videoHasPlayed;
+                           (videoFrameCount == 0);
     
     if (shouldStartVideo) {
         std::cout << "TRIGGERING VIDEO!" << std::endl;
         audioPlay = true;
-        videoHasPlayed = true;
         videoFrameCount = 1;
     }
 
-        if (!faces.empty() && distractionCounter > 0) {
+    if (videoFrameCount > 0 && !faces.empty()) {
         cv::Point leftEyeCenter(
         (shape.part(36).x() + shape.part(39).x()) / 2,
         (shape.part(36).y() + shape.part(39).y()) / 2
@@ -238,11 +258,9 @@ extern "C" void processFrame(unsigned char* buffer) {
         (leftEyeCenter.x + rightEyeCenter.x) / 2,
         (leftEyeCenter.y + rightEyeCenter.y) / 2
         );
-        
-        // dynamic scaling based on face width
-        int faceWidth = faces[0].width();
-        int emojiWidth = static_cast<int>(faceWidth * 1.0);
-        int emojiHeight = static_cast<int>(faceWidth * 0.7);
+
+        int emojiWidth = static_cast<int>(faces[0].width() * 1.0);
+        int emojiHeight = static_cast<int>(faces[0].width() * 0.7);
         cv::Size emojiSize(emojiWidth, emojiHeight); 
 
         overlayImage(frame, emojiImage, eyesMidpoint, emojiSize);
@@ -266,30 +284,22 @@ extern "C" void processFrame(unsigned char* buffer) {
                 std::cout << "VIDEO ENDED" << std::endl;
                 videoFrameCount = 0; 
                 distractionCounter = 0;
-                videoHasPlayed = false;
                 videoOverlay.set(cv::CAP_PROP_POS_FRAMES, 0); 
             }
         }
 
         if (!videoFrame.empty()) {
-            cv::resize(videoFrame, videoFrame, frame.size()); 
-
-            cv::Scalar lowerGreen = cv::Scalar(0, 100, 0);
-            cv::Scalar upperGreen = cv::Scalar(100, 255, 100);
-
+            cv::resize(videoFrame, videoFrame, frame.size());
+    
+            // create mask for green screen
             cv::Mat mask;
-            cv::inRange(videoFrame, lowerGreen, upperGreen, mask);
+            cv::inRange(videoFrame, cv::Scalar(0, 100, 0), cv::Scalar(100, 255, 100), mask);
             
             cv::Mat inverseMask;
             cv::bitwise_not(mask, inverseMask);
-
-            cv::Mat foregroundContent;
-            videoFrame.copyTo(foregroundContent, inverseMask);
-
-            cv::Mat backgroundContent;
-            frame.copyTo(backgroundContent, mask);
-
-            cv::add(foregroundContent, backgroundContent, frame);
+            
+            // copy only non-green pixels from video to frame
+            videoFrame.copyTo(frame, inverseMask);
         }
     }
 
