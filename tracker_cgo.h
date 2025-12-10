@@ -1,7 +1,5 @@
-#ifndef TRACKER_H
-#define TRACKER_H
-
-#include <opencv2/opencv.hpp>
+#ifndef TRACKER_CGO_H
+#define TRACKER_CGO_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -9,7 +7,7 @@ extern "C" {
 
 int initializeTracker(int width, int height, const char* videoPath, const char* modelPath);
 void processFrame(unsigned char* buffer);
-void overlayImage(cv::Mat& background, const cv::Mat& foreground, cv::Point location, cv::Size targetSize);
+int checkAudioPlay();
 void shutdownTracker();
 
 #ifdef __cplusplus

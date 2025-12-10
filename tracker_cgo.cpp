@@ -1,5 +1,6 @@
 // dependencies
 #include "tracker_cgo.h"
+#include "tracker_internal.h"
 #include <iostream>
 #include <cmath>
 #include <vector>
@@ -20,7 +21,9 @@ int WIDTH = 640;
 int HEIGHT = 480;
 bool userLooking = false;
 int videoFrameCount = 0;
-int distractionCounter = 0; // Added global distraction counter
+int distractionCounter = 0;
+bool audioPlay = false;
+bool videoHasPlayed = false;
 
 // convert OpenCV to dlib image format
 dlib::cv_image<dlib::bgr_pixel> dlib_img(cv::Mat& mat) {
@@ -39,7 +42,7 @@ void overlayImage(cv::Mat& background, const cv::Mat& foreground, cv::Point loca
 
     // Adjusted vertical offset (+50) to center the emoji better on the face
     int fx = location.x - targetSize.width / 2;
-    int fy = location.y - targetSize.height + 50;
+    int fy = location.y - targetSize.height / 2 - 20;
 
     int xStart = std::max(fx, 0);
     int yStart = std::max(fy, 0);
@@ -64,16 +67,42 @@ void overlayImage(cv::Mat& background, const cv::Mat& foreground, cv::Point loca
 }
 
 // calculate horizontal eye poisition relative to width
-double getGazeRatio(const dlib::full_object_detection& shape, int startIndex) {
-    cv::Point p1(shape.part(startIndex).x(), shape.part(startIndex).y());
-    cv::Point p4(shape.part(startIndex + 3).x(), shape.part(startIndex + 3).y());
-
-    double gazePointX = (shape.part(startIndex + 1).x() + shape.part(startIndex + 5).x() ) / 2.0;
+double getEyeAspectRatio(const dlib::full_object_detection& shape, int startIndex) {
+    // Vertical eye landmarks
+    cv::Point2f p2(shape.part(startIndex + 1).x(), shape.part(startIndex + 1).y());
+    cv::Point2f p3(shape.part(startIndex + 2).x(), shape.part(startIndex + 2).y());
+    cv::Point2f p4(shape.part(startIndex + 4).x(), shape.part(startIndex + 4).y());
+    cv::Point2f p5(shape.part(startIndex + 5).x(), shape.part(startIndex + 5).y());
     
-    double eyeWidth = std::abs(p4.x - p1.x);
-    if (eyeWidth == 0) return 0.5;
+    // horizontal eye landmarks
+    cv::Point2f p1(shape.part(startIndex).x(), shape.part(startIndex).y());
+    cv::Point2f p6(shape.part(startIndex + 3).x(), shape.part(startIndex + 3).y());
+    
+    double verticalDist1 = cv::norm(p2 - p4);
+    double verticalDist2 = cv::norm(p3 - p5);
+    double horizontalDist = cv::norm(p1 - p6);
+    
+    if (horizontalDist == 0) return 0.3;
+    
+    return (verticalDist1 + verticalDist2) / (2.0 * horizontalDist);
+}
 
-    return (gazePointX - p1.x) / eyeWidth;
+double getGazeRatio(const dlib::full_object_detection& shape, int startIndex) {
+    // eye corner points
+    cv::Point2f leftCorner(shape.part(startIndex).x(), shape.part(startIndex).y());
+    cv::Point2f rightCorner(shape.part(startIndex + 3).x(), shape.part(startIndex + 3).y());
+    
+    // iris/pupil approximation (center of eye)
+    double pupilX = (shape.part(startIndex + 1).x() + shape.part(startIndex + 2).x() + 
+                     shape.part(startIndex + 4).x() + shape.part(startIndex + 5).x()) / 4.0;
+    
+    double eyeWidth = std::abs(rightCorner.x - leftCorner.x);
+    if (eyeWidth < 1) return 0.5;
+
+    // normalize pupil position relative to eye width
+    double gazeRatio = (pupilX - leftCorner.x) / eyeWidth;
+    
+    return gazeRatio;
 }
 
 // functions to be called by Go
@@ -133,17 +162,35 @@ extern "C" void processFrame(unsigned char* buffer) {
     if (!faces.empty()) {
         shape = predictor(img, faces[0]);
 
-        double leftGaze = getGazeRatio(shape, 42);
-        double rightGaze = getGazeRatio(shape, 36);
-
-        // Wide thresholds to account for noisy eye tracking and prevent constant "looking away" state
-        const double THRESHOLD_OUTER = 0.10;
-        const double THRESHOLD_INNER = 0.90;
-
-        bool rightGazing = rightGaze < THRESHOLD_OUTER || rightGaze > THRESHOLD_INNER;
-        bool leftGazing = leftGaze < THRESHOLD_OUTER || leftGaze > THRESHOLD_INNER;
+        double leftGaze = getGazeRatio(shape, 36);
+        double rightGaze = getGazeRatio(shape, 42); 
         
-        userLooking = !(rightGazing || leftGazing);
+        // calculate eye aspect ratio to detect closed eyes
+        double leftEAR = getEyeAspectRatio(shape, 36);
+        double rightEAR = getEyeAspectRatio(shape, 42);
+        double avgEAR = (leftEAR + rightEAR) / 2.0;
+        
+        const double GAZE_CENTER_MIN = 0.43;
+        const double GAZE_CENTER_MAX = 0.57;
+        const double EAR_THRESHOLD = 0.23;
+        
+        // check if eyes are closed
+        bool eyesClosed = avgEAR < EAR_THRESHOLD;
+        
+        // check if looking away horizontally
+       // Check EITHER eye looking away (OR not AND)
+        bool leftLookingAway = (leftGaze < GAZE_CENTER_MIN) || (leftGaze > GAZE_CENTER_MAX);
+        bool rightLookingAway = (rightGaze < GAZE_CENTER_MIN) || (rightGaze > GAZE_CENTER_MAX);
+        bool lookingAway = leftLookingAway || rightLookingAway;
+
+        userLooking = !eyesClosed && !lookingAway;
+
+        // Debug output every 30 frames
+        static int frameDebugCounter = 0;
+        if (++frameDebugCounter % 30 == 0) {
+            std::cout << "L:" << leftGaze << " R:" << rightGaze << " EAR:" << avgEAR 
+              << " Looking:" << userLooking << " Counter:" << distractionCounter << std::endl;
+        }
 
     } else {
         // If face is lost (e.g., severe head turn), trigger the effect
@@ -151,19 +198,58 @@ extern "C" void processFrame(unsigned char* buffer) {
     }
 
     const int MAX_VIDEO_FRAMES = 400;
-    const int DISTRACTION_THRESHOLD = 3; 
+    const int DISTRACTION_THRESHOLD = 2; 
     
     // Debounce Logic: Count up/down the distraction state
     if (!userLooking) {
         distractionCounter = std::min(distractionCounter + 1, DISTRACTION_THRESHOLD);
     } else {
         distractionCounter = std::max(distractionCounter - 1, 0); 
+
+        if (videoFrameCount > 0) {
+            videoFrameCount = 0;
+            videoOverlay.set(cv::CAP_PROP_POS_FRAMES, 0);
+            std::cout << "VIDEO STOPPED - User looking back" << std::endl;
+        }
     }
 
-    bool shouldStartVideo = (distractionCounter >= DISTRACTION_THRESHOLD) && (videoFrameCount == 0);
-    bool videoIsRunning = videoFrameCount > 0;
+    // only trigger if video hasn't played yet
+    bool shouldStartVideo = (distractionCounter >= DISTRACTION_THRESHOLD) && 
+                           (videoFrameCount == 0) && 
+                           !videoHasPlayed;
+    
+    if (shouldStartVideo) {
+        std::cout << "TRIGGERING VIDEO!" << std::endl;
+        audioPlay = true;
+        videoHasPlayed = true;
+        videoFrameCount = 1;
+    }
 
-    bool showOverlay = shouldStartVideo || videoIsRunning;
+        if (!faces.empty() && distractionCounter > 0) {
+        cv::Point leftEyeCenter(
+        (shape.part(36).x() + shape.part(39).x()) / 2,
+        (shape.part(36).y() + shape.part(39).y()) / 2
+        );
+        cv::Point rightEyeCenter(
+        (shape.part(42).x() + shape.part(45).x()) / 2,
+        (shape.part(42).y() + shape.part(45).y()) / 2
+        );
+        cv::Point eyesMidpoint(
+        (leftEyeCenter.x + rightEyeCenter.x) / 2,
+        (leftEyeCenter.y + rightEyeCenter.y) / 2
+        );
+        
+        // dynamic scaling based on face width
+        int faceWidth = faces[0].width();
+        int emojiWidth = static_cast<int>(faceWidth * 1.0);
+        int emojiHeight = static_cast<int>(faceWidth * 0.7);
+        cv::Size emojiSize(emojiWidth, emojiHeight); 
+
+        overlayImage(frame, emojiImage, eyesMidpoint, emojiSize);
+    }
+    
+    bool videoIsRunning = videoFrameCount > 0;
+    bool showOverlay = videoIsRunning;
 
     if (showOverlay) {
         
@@ -176,13 +262,12 @@ extern "C" void processFrame(unsigned char* buffer) {
         videoOverlay >> videoFrame;
 
         if (videoFrame.empty() || videoFrameCount >= MAX_VIDEO_FRAMES) {
-            videoOverlay.set(cv::CAP_PROP_POS_FRAMES, 0);
-            videoOverlay >> videoFrame;
-            
-            // CRITICAL FIX: Reset both counters to stop loop after MAX_VIDEO_FRAMES
             if (videoFrameCount >= MAX_VIDEO_FRAMES) {
+                std::cout << "VIDEO ENDED" << std::endl;
                 videoFrameCount = 0; 
                 distractionCounter = 0;
+                videoHasPlayed = false;
+                videoOverlay.set(cv::CAP_PROP_POS_FRAMES, 0); 
             }
         }
 
@@ -208,18 +293,6 @@ extern "C" void processFrame(unsigned char* buffer) {
         }
     }
 
-    // Scaled Emoji Drawing (placed here to ensure shape/faces are defined and video overlay is complete)
-    if (!faces.empty()) {
-        cv::Point headPosition(shape.part(30).x(), shape.part(30).y());
-        
-        // Dynamic scaling based on face width
-        int faceWidth = faces[0].width();
-        int emojiWidth = static_cast<int>(faceWidth / 3.0);
-        cv::Size emojiSize(emojiWidth, emojiWidth); 
-
-        overlayImage(frame, emojiImage, headPosition, emojiSize);
-    }
-
     if (frame.total() * frame.elemSize() <= WIDTH * HEIGHT * 3) {
             std::memcpy(buffer, frame.data, frame.total() * frame.elemSize());
     }
@@ -233,4 +306,10 @@ extern "C" void shutdownTracker() {
     if (videoOverlay.isOpened()) {
         videoOverlay.release();
     }
+}
+
+extern "C" int checkAudioPlay() {
+    bool status = audioPlay;
+    audioPlay = false; // Reset after checking
+    return status ? 1 : 0;
 }

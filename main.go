@@ -1,8 +1,14 @@
 package main
 
 /*
-#cgo CFLAGS: -I.
-#cgo LDFLAGS: ./libtracker.so
+#cgo CXXFLAGS: -std=c++17
+#cgo CXXFLAGS: -I/opt/homebrew/opt/opencv/include/opencv4
+#cgo LDFLAGS: -L/opt/homebrew/opt/opencv/lib
+#cgo LDFLAGS: -lopencv_core -lopencv_imgproc -lopencv_highgui -lopencv_videoio -lopencv_imgcodecs
+#cgo LDFLAGS: -ldlib
+#cgo LDFLAGS: -framework Accelerate
+#cgo LDFLAGS: -L${SRCDIR} -ltracker
+
 #include "tracker_cgo.h"
 #include <stdlib.h>
 */
@@ -10,9 +16,13 @@ import "C"
 
 import (
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"unsafe"
-	
+
+	"github.com/hajimehoshi/go-mp3"
+	"github.com/hajimehoshi/oto"
 	"github.com/veandco/go-sdl2/sdl"
 )
 
@@ -23,11 +33,59 @@ const (
 	buffer = width * height * 3
 )
 
+var audioPlayer *oto.Player
+var audioContext *oto.Context
+
+var audioData []byte
+var audioSampleRate int
+
+func loadAudio(filePath string) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		log.Fatalf("Failed to open audio file: %v", err)
+	}
+	defer file.Close()
+
+	decoder, err := mp3.NewDecoder(file)
+	if err != nil {
+		log.Fatalf("Failed to create MP3 decoder: %v", err)
+	}
+
+	audioSampleRate = decoder.SampleRate()
+	audioData, err = io.ReadAll(decoder)
+	if err != nil {
+		log.Fatalf("Failed to read audio data: %v", err)
+	}
+
+	audioContext, err = oto.NewContext(audioSampleRate, 2, 2, 8192)
+	if err != nil {
+		log.Fatalf("Failed to create Oto context: %v", err)
+	}
+
+	audioPlayer = audioContext.NewPlayer()
+}
+
+func playAudio() {
+	if audioPlayer != nil {
+		audioPlayer.Close()
+	}
+
+	// Get the context that was already created in loadAudio
+	audioPlayer = audioContext.NewPlayer()
+
+	_, err := audioPlayer.Write(audioData)
+	if err != nil {
+		log.Printf("Failed to play audio: %v", err)
+	}
+}
+
 func main() {
 	// file names
 	video := "distraction_video.mp4"
 	emoji := "emoji.png"
 	model := "shape_predictor_68_face_landmarks.dat"
+
+	loadAudio("carl.mp3")
 
 	cVideo := C.CString(video)
 	defer C.free(unsafe.Pointer(cVideo))
@@ -91,6 +149,11 @@ func main() {
 		}
 
 		C.processFrame((*C.uchar)(unsafe.Pointer(&frameBuffer[0])))
+
+		if C.checkAudioPlay() != 0 {
+			playAudio()
+		}
+
 		texture.Update(nil, unsafe.Pointer(&frameBuffer[0]), width*3)
 
 		renderer.Clear()
